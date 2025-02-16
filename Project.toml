@@ -1,0 +1,17 @@
+name = "MoireContinuumModel"
+uuid = "39df9de1-47f7-4917-b34f-64962ce6f101"
+authors = ["cdqz2014 <xiaodong.hu@bc.edu>"]
+version = "0.1.0"
+
+[deps]
+KrylovKit = "0b1a1467-8014-51b9-945f-bf0ae24f4b77"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MLStyle = "d8e11817-5142-5d16-987a-aa16d5891078"
+PhysicalConstants = "5ad8b20f-a522-5ce9-bfc9-ddf1d5bda6ab"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[compat]
+PhysicalConstants = "0.2.3"
+Unitful = "1.21.0"
