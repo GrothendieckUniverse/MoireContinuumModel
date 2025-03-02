@@ -15,16 +15,16 @@ using HilbertSpace, CMP_Utils
 Struct `R_Stack_Moire_Model` for R-Stacked (Parallel-Stacked) Twisted Bilayer TMD Model
 ---
 - Fields:
-    - `brav_vec_list::Vector{Vector{Float64}}`: Bravais vectors of the moire superlattice
-    - `reciprocal_vec_list::Vector{Vector{Float64}}`: Reciprocal lattice vectors of the moire superlattice
-    - `params::Dict{String,<:Number}`: Parameters of the model
-    - `nG_cutoff::Int64`: The cutoff of the reciprocal lattice vectors
-    - `G_int_list::Vector{Vector{Int64}}`: List of reciprocal lattice vectors
-    - `G_int_to_iG_dict::Dict{Vector{Int64},Int64}`: Mapping from reciprocal lattice vectors to indices
-    - `nG::Int64`: Length of `G_int_list`
-    - `nl::Int64`: Number of layers
-    - `moire_Hamitonian_basis::HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space`: Single-particle basis that spans the moire Hamiltonian matrix
-    - `hk_matrix_for_valley::F where {F<:Function}`: Function `hk_matrix_for_valley(k_crys::Vector{Float64}, valley::Int)` to get the Hamiltonian matrix for a given moire crystal momentum and valley index
+    - `brav_vec_list::Vector{Vector{Float64}}`: bravais vectors of the moire superlattice
+    - `reciprocal_vec_list::Vector{Vector{Float64}}`: reciprocal lattice vectors of the moire superlattice
+    - `params::Dict{String,<:Number}`: parameters of the model
+    - `nG_cutoff::Int64`: cutoff of `G_int` in either directions
+    - `G_int_list::Vector{Vector{Int64}}`: list of `G_int` that are used to construct the moire Hamiltonian
+    - `G_int_to_iG_dict::Dict{Vector{Int64},Int64}`: dict `G_int -> iG`
+    - `nG::Int64`: length of `G_int_list`
+    - `nl::Int64`: number of layers
+    - `moire_Hamitonian_basis::HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space`: single-particle basis that spans the moire Hamiltonian matrix
+    - `hk_matrix_for_valley::F where {F<:Function}`: function `(k_crys, valley_index::Int) -> moire Hamiltonian matrix for that valley`
 """
 mutable struct R_Stack_Moire_Model
     brav_vec_list::Vector{Vector{Float64}}
@@ -37,7 +37,7 @@ mutable struct R_Stack_Moire_Model
     nl::Int64
 
     moire_Hamitonian_basis::HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space
-    hk_matrix_for_valley::F where {F<:Function} # `(k_crys, valley_index::Int) -> moire Hamiltonian matrix`
+    hk_matrix_for_valley::F where {F<:Function} # function `(k_crys, valley_index::Int) -> moire Hamiltonian matrix for that valley`
 end
 
 "Fengcheng Wu's parameters from local stacking fitting, see `PhysRevLett.122.086402`"
@@ -50,7 +50,7 @@ const params_FengchengWu = Dict(
     "θ" => 1.2, # deg
     "d" => 300, # gating distance
     "interlayer_distance" => 7.8, # in unit of Å, see suplemental material of `PhysRevLett.122.086402`
-    "eE" => 0.0, # meV/Å so the layer potential difference is `eE * d`
+    "eE" => 0.0, # meV/Å so the layer potential difference is `eE * interlayer_distance`
 )
 
 "Chong Wang's parameters from large-scale DFT fitting, see `PhysRevLett.132.036501`"
@@ -63,7 +63,7 @@ const params_ChongWang = Dict(
     "θ" => 3.89, # deg
     "d" => 300, # gating distance
     "interlayer_distance" => 7.4, # in unit of Å, see Fig.(1d) in `PhysRevLett.132.036501`
-    "eE" => 0.0, # meV/Å, so the layer potential difference is `eE * d`
+    "eE" => 0.0, # meV/Å, so the layer potential difference is `eE * interlayer_distance`
 )
 
 
@@ -210,8 +210,8 @@ end
 Constructor of `R_Stack_Moire_Model`
 ---
 - Named Args:
-    - `params::Dict{String,<:Number}`: parameters of the model
-    - `nG_cutoff::Int64=5`: The cutoff of the reciprocal lattice vectors
+    - `params::Dict{String,<:Number}`: parameters of the model (default to be `params_ChongWang`)
+    - `nG_cutoff::Int64=5`: cutoff of `G_int` in either directions
 """
 function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number}=params_ChongWang, nG_cutoff::Int64=5)
     params = merge(params_ChongWang, params)
