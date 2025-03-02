@@ -9,7 +9,7 @@ using Unitful
 
 using LinearAlgebra, SparseArrays, KrylovKit
 using Plots, MLStyle
-
+using HilbertSpace, CMP_Utils
 
 """
 Struct `R_Stack_Moire_Model` for R-Stacked (Parallel-Stacked) Twisted Bilayer TMD Model
@@ -22,8 +22,8 @@ Struct `R_Stack_Moire_Model` for R-Stacked (Parallel-Stacked) Twisted Bilayer TM
     - `G_int_list::Vector{Vector{Int64}}`: List of reciprocal lattice vectors
     - `G_int_to_iG_dict::Dict{Vector{Int64},Int64}`: Mapping from reciprocal lattice vectors to indices
     - `nG::Int64`: Length of `G_int_list`
-    - `potential_dict::Dict{Vector{Int64},AbstractMatrix}`: Dictionary of potential blocks
-    - `nlayer::Int64`: Number of layers
+    - `nl::Int64`: Number of layers
+    - `moire_Hamitonian_basis::HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space`: Single-particle basis that spans the moire Hamiltonian matrix
     - `hk_matrix_for_valley::F where {F<:Function}`: Function `hk_matrix_for_valley(k_crys::Vector{Float64}, valley::Int)` to get the Hamiltonian matrix for a given moire crystal momentum and valley index
 """
 mutable struct R_Stack_Moire_Model
@@ -34,14 +34,13 @@ mutable struct R_Stack_Moire_Model
     G_int_list::Vector{Vector{Int64}}
     G_int_to_iG_dict::Dict{Vector{Int64},Int64}
     nG::Int64
+    nl::Int64
 
-    potential_dict::Dict{Vector{Int64},AbstractMatrix} # includes both moire potential and interlayer tunneling blocks
-    nlayer::Int64
-
+    moire_Hamitonian_basis::HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space
     hk_matrix_for_valley::F where {F<:Function} # `(k_crys, valley_index::Int) -> moire Hamiltonian matrix`
 end
 
-"Fengcheng Wu's parameters from local twisting fitting"
+"Fengcheng Wu's parameters from local stacking fitting, see `PhysRevLett.122.086402`"
 const params_FengchengWu = Dict(
     "a" => 3.472, # Angstrom
     "m" => 0.62, # Electron mass
@@ -53,12 +52,13 @@ const params_FengchengWu = Dict(
     "interlayer_distance" => 7.8, # in unit of Å, see suplemental material of `PhysRevLett.122.086402`
     "eE" => 0.0, # meV/Å so the layer potential difference is `eE * d`
 )
-"Chong Wang's parameters from large-scale DFT fitting"
+
+"Chong Wang's parameters from large-scale DFT fitting, see `PhysRevLett.132.036501`"
 const params_ChongWang = Dict(
     "a" => 3.52, # Angstrom
     "m" => 0.6, # Electron mass
     "V" => 20.75, # meV ~ 20.8 meV
-    "ψ" => 107.7, # deg
+    "ψ" => -107.7, # deg
     "w" => -23.82, # meV ~ 23.8 meV
     "θ" => 3.89, # deg
     "d" => 300, # gating distance
@@ -66,171 +66,183 @@ const params_ChongWang = Dict(
     "eE" => 0.0, # meV/Å, so the layer potential difference is `eE * d`
 )
 
+
+
 """
-Valley Hamiltonian Matrix from `H_{v;l,g,l',g'}(k) = ⟨v,l,g,k|H|v,l′,g′,k⟩`
+Kinetic Part of the Moire Hamiltonian within the Layer Block
 ---
-for a given valley index and moire crystal momentum. The order of slots here is important!
+including the displacment-field-induced potential differences.
+- Args:
+    - `k_crys::Vector{Float64}`: moire crystal momentum
+- Named Args:
+    - `reciprocal_vec_list::Vector{<:Vector{Float64}}`: reciprocal lattice vectors of the moire superlattice
+    - `params::Dict{String,<:Number}`: parameters of the model
 """
-function _get_Hamiltonian_for_valley(k_crys, valley_index::Int64; G_int_list::Vector{<:Vector{Int}}, potential_dict::Dict{Vector{Int64},<:Matrix}, mass::Float64, reciprocal_vec_list::Vector{<:Vector{Float64}})
-    nG = length(G_int_list)
-    @assert valley_index in 1:2 "valley_index must be 1 or 2, representing valley K or K′"
-    nlayer = size(first(values(potential_dict)), 1) # layer degrees of freedom
+function _kinetic_block(k_crys; reciprocal_vec_list::Vector{<:Vector{Float64}}, params::Dict{String,<:Number})
+    κ_plus = [2 / 3, -1 / 3] # moire `κ+ = (G1+G6)/3 = (2/3,-1/3)`
+    κ_minus = [1 / 3, 1 / 3] # moire `κ- = (G1+G2)/3 = (1/3,1/3)`
 
-    hk_array_for_valley = zeros(ComplexF64, nlayer, nG, nlayer, nG) # `H_{v;l,g,l',g'}(k) = ⟨v,l,g,k|H|v,l′,g′,k⟩`. Note: it is OK to change the order for slots for `hk_array_for_valley` here. But because we want to splat it into the Hamiltonian matrix using `reshape` method, with the result that the column/row are of the form `g + κ_l`, the order of slots are almost fixed here. Indeed, you can only swith the order of the first two and last two slots, but never mix them.
+    #(1.0546 x 10^-34)^2*10^20/(9.109*10^(-31))/(1.6022*10^(-19))*1000=7621
+    unit = ustrip(u"meV * Å^2", ħ^2 / m_e) # see `PhysicalConstants.CODATA2018`
+    m = params["m"]
+
+    eE = params["eE"]
+    interlayer_distance = params["interlayer_distance"]
+
+    E_t = norm(sum(reciprocal_vec_list .* (k_crys - κ_plus)))^2
+    E_b = norm(sum(reciprocal_vec_list .* (k_crys - κ_minus)))^2
+
+    E_k = -unit * 1 / (2 * m) * diagm([E_t, E_b])
+    E_eE = diagm([-eE * interlayer_distance / 2, eE * interlayer_distance / 2]) # displacment field induced sublattice potential differences (which effectively contributes to the `g=0` moire potential)
+
+    return E_k + E_eE
+end
+
+"""
+Generate the Dictionary `ΔG_int_to_layer_block_dict` within the First g-shell
+---
+We keep the difference of the moire-reciprocal vectors within the first g-shell only, i.e., `Δg≡g-g′` is constrained within the honeycomb spanned by `g1, g2, g3, g4, g5, g6` with `|gi|=|b1|=|b2|` *of their own layers* (so for top/bottom layers we have two overlapping honeycombs shifted by `(κ+)-(κ-)`). In our convention, `g1` is along x-direction, and `gi=R((i-1)*π/3)g1`.
+
+Note: truncation within the first g-shell means that only those hopping matrix elements connecting sites within the first-g shell of the corresponding layers are included.
+___
+- Named Args:
+    - `params::Dict{String,<:Number}`: parameters of the model
+"""
+function _get_ΔG_int_to_layer_block_dict_within_first_g_shell(; params::Dict{String,<:Number})::Dict{Vector{Int},Matrix{ComplexF64}}
+    w = params["w"]
+    V = params["V"]
+    ψ = deg2rad(params["ψ"]) # the original input is in degree
+
+    intralayer_moire_potential_dict = Dict{Vector{Int},Matrix{ComplexF64}}()
+    interlayer_tunneling_dict = Dict{Vector{Int},Matrix{ComplexF64}}()
+    ΔG_int_to_layer_block_dict = Dict{Vector{Int},Matrix{ComplexF64}}()
+
+    # for intralayer moire potential, every hopping is within the first-g-shell honeycomb of the corresponding layer
+    intralayer_moire_potential_dict[[1, 0]] = diagm([V * exp(im * ψ), V * exp(-im * ψ)])
+    intralayer_moire_potential_dict[[-1, 1]] = diagm([V * exp(im * ψ), V * exp(-im * ψ)])
+    intralayer_moire_potential_dict[[0, -1]] = diagm([V * exp(im * ψ), V * exp(-im * ψ)])
+    intralayer_moire_potential_dict[[0, 1]] = diagm([V * exp(-im * ψ), V * exp(im * ψ)])
+    intralayer_moire_potential_dict[[-1, 0]] = diagm([V * exp(-im * ψ), V * exp(im * ψ)])
+    intralayer_moire_potential_dict[[1, -1]] = diagm([V * exp(-im * ψ), V * exp(im * ψ)])
 
 
-    for (iG, G) in enumerate(G_int_list)
-        hk_array_for_valley[:, iG, :, iG] += @match valley_index begin
-            1 => _kinetic_block(k_crys + G; mass=mass, reciprocal_vec_list=reciprocal_vec_list) # valley `K`
-            2 => conj(_kinetic_block(-k_crys - G; mass=mass, reciprocal_vec_list=reciprocal_vec_list)) # valley `K′` as the time-reversal of valley `K`
+    interlayer_tunneling_dict[[0, 0]] = [0 w; conj(w) 0] # for the zeroth shell: both directions of hoppings are within their own honeycombs
+    # interlayer_tunneling_dict[[1, 0]] = zeros(ComplexF64, 2, 2) # for g1: both directions of hoppings get outside of their own honeycombs, no need to store the zero matrix
+    interlayer_tunneling_dict[[0, 1]] = [0 0; conj(w) 0] # for g2: only hopping from top honeycomb to bottom honeycomb is within the top honeycomb. The reverse get outside of the bottom honeycomb
+    interlayer_tunneling_dict[[-1, 1]] = [0 0; conj(w) 0] # for g3: only hopping from top honeycomb to bottom honeycomb is within the top honeycomb. The reverse get outside of the bottom honeycomb
+    # interlayer_tunneling_dict[[-1, 0]] = zeros(ComplexF64, 2, 2) # for g4: both directions of hoppings get outside of their own honeycombs, no need to store the zero matrix
+    interlayer_tunneling_dict[[0, -1]] = [0 w; 0 0] # for g5: only hopping from bottom honeycomb to top honeycomb is within the bottom honeycomb. The reverse get outside of the top honeycomb
+    interlayer_tunneling_dict[[1, -1]] = [0 w; 0 0] # for g6: only hopping from bottom honeycomb to top honeycomb is within the bottom honeycomb. The reverse get outside of the top honeycomb
+
+
+    for (k, v) in intralayer_moire_potential_dict
+        ΔG_int_to_layer_block_dict[k] = get!(ΔG_int_to_layer_block_dict, k, zeros(ComplexF64, 2, 2)) + v
+    end
+    for (k, v) in interlayer_tunneling_dict
+        ΔG_int_to_layer_block_dict[k] = get!(ΔG_int_to_layer_block_dict, k, zeros(ComplexF64, 2, 2)) + v
+    end
+
+    return ΔG_int_to_layer_block_dict
+end
+
+"""
+Construct the Function of Moire Hamiltonian Matrix for a Given Valley
+---
+for a given moire crystal momentum `k_crys` and a valley index `iv∈(1,2)` representing valley-K or K′. The full moire Hamiltonian matrix elements for valley-v are expanded with the moire plane wave `⟨k,g,l,v|H|k,g′,l′,v⟩` for moire reciprocal vectors `g,g′`, and layer indices `l,l′`. Here we want to output the moire Hamiltonian for each valley as a function `(k_crys, iv) -> hk_matrix_for_valley`, *without* explicit construction of the full list of the moire Hamiltonian for each `k_crys` and each `iv`, thus here both crystal-momentum `k_crys` and valley index `iv` should be **excluded** from the single-particle basis that spans the moire Hamiltonian matrix.
+___ 
+Practically, we first construct the single-particle basis of type `HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space` spanned by the left degrees of freedom: the moire reciprocal vectors `iG`, and the layer index `il`. And then input the Hamiltonian matrix elements of the `hk_matrix_for_valley` in terms of this single-particle basis.
+___
+- Args:
+    - `k_crys::Vector{<:Number}`: moire crystal momentum
+    - `iv::Int`: valley index
+- Named Args:
+    - `reciprocal_vec_list::Vector{<:Vector{Float64}}`: reciprocal lattice vectors of the moire superlattice
+    - `G_int_list::Vector{Vector{Int}}`: the truncated list of moire reciprocal vectors that are used to construct the moire Hamiltonian
+    - `ΔG_int_to_layer_block_dict::Dict{Vector{Int},<:Matrix}`: dictionary from `ΔG_int` to the Hamiltonian matrix within the layer block
+    - `params::Dict{String,<:Number}`: parameters of the model
+"""
+function _get_hk_matrix_for_valley(k_crys::Vector{<:Number}, iv::Int;
+    reciprocal_vec_list::Vector{<:Vector{<:Float64}},
+    G_int_list::Vector{Vector{Int}},
+    ΔG_int_to_layer_block_dict::Dict{Vector{Int},Matrix{ComplexF64}},
+    moire_Hamitonian_basis::HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space,
+    params::Dict{String,<:Number}
+)::Matrix{ComplexF64}
+    @assert iv ∈ (1, 2) "Check input: the valley index `iv` must be 1 or 2, representing valley-K or K′"
+
+    hk_matrix_for_valley = zeros(ComplexF64, moire_Hamitonian_basis.nstate, moire_Hamitonian_basis.nstate)
+
+    for (iψ, ψ) in enumerate(moire_Hamitonian_basis.state_list)
+        (iG, il) = ψ.dof_indices
+        G_int = G_int_list[iG]
+
+        layer_block = @match iv begin
+            1 => _kinetic_block(k_crys + G_int; reciprocal_vec_list=reciprocal_vec_list, params=params)
+            2 => conj(_kinetic_block(-(k_crys + G_int); reciprocal_vec_list=reciprocal_vec_list, params=params))
         end
-        for (iG′, G′) in enumerate(G_int_list)
-            # input moire potential
-            ΔG = G - G′
-            if ΔG in keys(potential_dict)
-                hk_array_for_valley[:, iG, :, iG′] += @match valley_index begin
-                    1 => potential_dict[ΔG]
-                    2 => conj(potential_dict[-ΔG])
+
+        if layer_block[il, il] != 0.0
+            hk_matrix_for_valley[iψ, iψ] += layer_block[il, il]
+        end
+
+        for (iψ′, ψ′) in enumerate(moire_Hamitonian_basis.state_list)
+            (iG′, il′) = ψ′.dof_indices
+            G′_int = G_int_list[iG′]
+
+            ΔG = G_int - G′_int
+            if ΔG in keys(ΔG_int_to_layer_block_dict)
+                layer_block = @match iv begin
+                    1 => ΔG_int_to_layer_block_dict[ΔG]
+                    2 => conj(ΔG_int_to_layer_block_dict[-ΔG])
+                end
+                if layer_block[il, il′] != 0.0
+                    hk_matrix_for_valley[iψ, iψ′] += layer_block[il, il′]
                 end
             end
         end
     end
 
-    return Hermitian(reshape(hk_array_for_valley, nlayer * nG, nlayer * nG))
-
-
-    # hk_array_for_valley = zeros(ComplexF64, nlayer, 2 * nG_cutoff + 1, 2 * nG_cutoff + 1, nlayer, 2 * nG_cutoff + 1, 2 * nG_cutoff + 1) # layer, G1, G2, layer′, G1′, G2′
-    # for iG1 in axes(hk_array_for_valley, 2), iG2 in axes(hk_array_for_valley, 3)
-    #     G = [iG1 - nG_cutoff - 1, iG2 - nG_cutoff - 1]
-    #     hk_array_for_valley[:, iG1, iG2, :, iG1, iG2] += @match valley_index begin
-    #         1 => _kinetic_block(k_crys + G, m) # valley `K`
-    #         2 => conj(_kinetic_block(-k_crys - G, m)) # valley `K′` as the time-reversal of valley `K`
-    #     end
-    #     for iG1′ in axes(hk_array_for_valley, 5), iG2′ in axes(hk_array_for_valley, 6)
-    #         G′ = [iG1′ - nG_cutoff - 1, iG2′ - nG_cutoff - 1]
-    #         ΔG = G - G′
-    #         if ΔG in keys(potential_dict)
-    #             hk_array_for_valley[:, iG1, iG2, :, iG1′, iG2′] += @match valley_index begin
-    #                 1 => potential_dict[ΔG]
-    #                 2 => conj(potential_dict[-ΔG])
-    #             end
-    #         end
-    #     end
-    # end
-
-    # return Hermitian(reshape(hk_array_for_valley, nlayer * nG, nlayer * nG))
+    return hk_matrix_for_valley
 end
 
 
-
-function _kinetic_block(k_crys; mass::Float64, reciprocal_vec_list::Vector{<:Vector{Float64}})
-    κ_plus = [2 / 3, -1 / 3] # moire `κ+`
-    κ_minus = [1 / 3, 1 / 3] # moire `κ-`
-
-    #(1.0546 x 10^-34)^2*10^20/(9.109*10^(-31))/(1.6022*10^(-19))*1000=7621
-    unit_const = ustrip(u"meV * Å^2", ħ^2 / m_e) # see `PhysicalConstants.CODATA2018`
-
-    Ek_t = -1 / (2 * mass) * norm(sum(reciprocal_vec_list .* (k_crys - κ_plus)))^2
-    Ek_b = -1 / (2 * mass) * norm(sum(reciprocal_vec_list .* (k_crys - κ_minus)))^2
-
-    diagm(unit_const * [Ek_t, Ek_b])
-end
-
-
-
-
-function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number}, nG_cutoff::Int64=5)
+"""
+Constructor of `R_Stack_Moire_Model`
+---
+- Named Args:
+    - `params::Dict{String,<:Number}`: parameters of the model
+    - `nG_cutoff::Int64=5`: The cutoff of the reciprocal lattice vectors
+"""
+function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number}=params_ChongWang, nG_cutoff::Int64=5)
+    params = merge(params_ChongWang, params)
     @info let io = IOBuffer()
-        write(io, "Initializing R-Stack Moire Continuum Model\n")
-        write(io, "\twith parameters: $params") # # show(io, "text/plain", params)
+        write(io, "Initializing R-Stack Moire Continuum Model with parameters:\n")
+        write(io, "\t$params") # show(io, "text/plain", params)
         String(take!(io))
     end
 
-    aM = params["a"] / (2 * sin(deg2rad(params["θ"] / 2))) # Angstrom
-    params["aM"] = aM # add moire lattice constant to the parameter dict
-
-    brav_vec_list = aM * [[sqrt(3) / 2, -1 / 2], [0, 1]] # Angstrom
-    (aM1, aM2) = Tuple(brav_vec_list)
-    # brav_vec_mat = hcat(brav_vec_list...)
-
-    # G_list = [4 * pi / (sqrt(3) * aM) * [cos(pi * (j - 1) / 3), sin(pi * (j - 1) / 3)] for j in 1:6]
-    reciprocal_vec_list = begin
-        aM1_3D = push!(deepcopy(aM1), 1)
-        aM2_3D = push!(deepcopy(aM2), 1)
-        aM3_3D = [0, 0, 1]
-        cell_volume = abs(aM1[1] * aM2[2] - aM1[2] * aM2[1]) # `cell_volume = |aM1∧aM2|`
-
-        b1 = 2 * pi * cross(aM2_3D, aM3_3D)[1:2] / cell_volume
-        b2 = 2 * pi * cross(aM3_3D, aM1_3D)[1:2] / cell_volume
-        # b3 = cross(a1, a2)
-
-        [b1, b2]
-    end
-    # reciprocal_vec_mat = 2 * pi * inv(brav_vec_mat)'
+    aM = params["a"] / (2 * sin(deg2rad(params["θ"] / 2))) # in unit of Å
+    params["aM"] = aM
+    brav_vec_list = aM * [[sqrt(3) / 2, -1 / 2], [0, 1]] # this choice of the bravias vector is important: it ensures `reciprocal_vec_list≡[𝐆1,𝐆2]` to be stored in the order of `𝐆1=[|𝐆|,0.0]` and `𝐆2≡e^{i2π/6}𝐆1`
+    reciprocal_vec_list = CMP_Utils.dual_basis_vec_list(brav_vec_list)
+    @assert reciprocal_vec_list[1][2] ≈ 0.0 # check convention for the moire reciprocal vector: `𝐆1=[|𝐆|,0.0]`
+    @assert angle(reciprocal_vec_list[2][1] + im * reciprocal_vec_list[2][2]) ≈ π / 3 # check convention for the moire reciprocal vector: `𝐆2≡e^{i2π/6}𝐆1`
 
 
-    nG_one_direction = 2 * nG_cutoff + 1
-    G_int_list = [[iG_1 - nG_cutoff - 1, iG_2 - nG_cutoff - 1] for iG_2 in 1:nG_one_direction for iG_1 in 1:nG_one_direction] # the order of the loop for G1 and G2 is important here (it must be consistent with the loop when inputing the Hamiltonian)
+    G_int_list = [[iG1, iG2] for iG2 in -nG_cutoff:nG_cutoff for iG1 in -nG_cutoff:nG_cutoff]
+    G_int_to_iG_dict = Dict(G_int => iG for (iG, G_int) in enumerate(G_int_list))
+    nG = length(G_int_list)
+    nl = 2 # number of layers, must be consistent with the size of values of `ΔG_int_to_layer_block_dict`
 
-    G_int_to_iG_dict = Dict{Vector{Int64},Int64}(G_int => iG for (iG, G_int) in enumerate(G_int_list))
-    nG = length(G_int_list) # also equal to `(2 * nG_cutoff + 1)^2`
+    moire_Hamitonian_basis = HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space(
+        dof_ndof=(nG, nl),
+        dof_name=("G", "l")
+    )
 
+    ΔG_int_to_layer_block_dict = _get_ΔG_int_to_layer_block_dict_within_first_g_shell(; params=params)
 
-    potential_dict = Dict{Vector{Int64},Matrix{ComplexF64}}()
-    moire_potential_dict = Dict{Vector{Int64},Matrix{ComplexF64}}()
-    interlayer_tunneling_dict = Dict{Vector{Int64},Matrix{ComplexF64}}()
-    let
-        w = params["w"]
-        V = params["V"]
-        ψ = deg2rad(params["ψ"])
-        eE = params["eE"]
-        d = params["d"]
-        interlayer_distance = params["interlayer_distance"]
-        begin
-            # keep the first g-shell only, i.e., input in the order of `g1, g2, g3, g4, g5, g6`. Here `g1` is along x-direction, and `gi=R((i-1)*π/3)g1`
-            # here first g-shell means a honeycomb grids spanned with a single unit of moire reciprocal vector `b1` for either layers (so we have two overlapping honeycombs differing by a shift of `(κ+)-(κ-)`). 
-            # Note: truncation of the first g-shell means that every hopping matrix elements must be included in the honeycomb of the source sites.
-            moire_potential_dict[[1, 0]] = diagm([V * exp(im * ψ), V * exp(-im * ψ)])
-            moire_potential_dict[[-1, 1]] = diagm([V * exp(im * ψ), V * exp(-im * ψ)])
-            moire_potential_dict[[0, -1]] = diagm([V * exp(im * ψ), V * exp(-im * ψ)])
-            moire_potential_dict[[0, 1]] = diagm([V * exp(-im * ψ), V * exp(im * ψ)])
-            moire_potential_dict[[-1, 0]] = diagm([V * exp(-im * ψ), V * exp(im * ψ)])
-            moire_potential_dict[[1, -1]] = diagm([V * exp(-im * ψ), V * exp(im * ψ)])
+    hk_matrix_for_valley = (k_crys::Vector{<:Number}, iv::Int) -> _get_hk_matrix_for_valley(k_crys, iv; reciprocal_vec_list=reciprocal_vec_list, G_int_list=G_int_list, ΔG_int_to_layer_block_dict=ΔG_int_to_layer_block_dict, moire_Hamitonian_basis=moire_Hamitonian_basis, params=params)
 
-
-            # displacment field induced sublattice potential differences (which effectively contributes to `g=0` moire potential). Note: this term can also be directly added to kinetic block
-            moire_potential_dict[[0, 0]] = diagm([-eE * interlayer_distance / 2, eE * interlayer_distance / 2])
-
-
-            interlayer_tunneling_dict[[0, 0]] = [0 w; conj(w) 0] # for the zeroth shell: both directions of hoppings are within their own honeycombs
-            interlayer_tunneling_dict[[1, 0]] = zeros(ComplexF64, 2, 2) # for g1: both directions of hoppings get outside of their own honeycombs
-            interlayer_tunneling_dict[[0, 1]] = [0 0; conj(w) 0] # for g2: only hopping from top honeycomb to bottom honeycomb is within the top honeycomb. The reverse get outside of the bottom honeycomb
-            interlayer_tunneling_dict[[-1, 1]] = [0 0; conj(w) 0] # for g3: only hopping from top honeycomb to bottom honeycomb is within the top honeycomb. The reverse get outside of the bottom honeycomb
-            interlayer_tunneling_dict[[-1, 0]] = zeros(ComplexF64, 2, 2) # for g4: both directions of hoppings get outside of their own honeycombs
-            interlayer_tunneling_dict[[0, -1]] = [0 w; 0 0] # for g4: only hopping from bottom honeycomb to top honeycomb is within the bottom honeycomb. The reverse get outside of the top honeycomb
-            interlayer_tunneling_dict[[1, -1]] = [0 w; 0 0] # for g5: only hopping from bottom honeycomb to top honeycomb is within the bottom honeycomb. The reverse get outside of the top honeycomb
-        end
-    end
-    @assert size(first(values(moire_potential_dict))) == size(first(values(interlayer_tunneling_dict))) "Illegal input: the moire potential block must be of the same shape as the interlayer tunneling block!"
-
-    nlayer = size(first(values(moire_potential_dict)), 1) # here is layer degrees of freedom
-
-    g_shell_range = (-1):1
-    for ig1 in g_shell_range, ig2 in g_shell_range
-        potential_dict[[ig1, ig2]] = get(moire_potential_dict, [ig1, ig2], zeros(ComplexF64, 2, 2)) + get(interlayer_tunneling_dict, [ig1, ig2], zeros(ComplexF64, 2, 2))
-    end
-
-    nlayer = size(first(values(potential_dict)), 1) # here is layer degrees of freedom
-
-
-    function hk_matrix_for_valley(k_crys, valley_index::Int64)::Matrix{ComplexF64}
-        _get_Hamiltonian_for_valley(k_crys, valley_index;
-            :G_int_list => G_int_list,
-            :potential_dict => potential_dict,
-            :mass => params["m"],
-            :reciprocal_vec_list => reciprocal_vec_list
-        )
-    end
 
     return R_Stack_Moire_Model(
         brav_vec_list,
@@ -240,8 +252,8 @@ function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number
         G_int_list,
         G_int_to_iG_dict,
         nG,
-        potential_dict,
-        nlayer,
+        nl,
+        moire_Hamitonian_basis,
         hk_matrix_for_valley
     )
 end
@@ -261,7 +273,7 @@ Plot Moire Bands Along a Given `k_crys_path`
     - `align_spec_to_zero::Bool=true`: Align the spectrum to zero
     - `show_spectrum::Bool=false`: Show the spectrum
 """
-function plot_moire_bands(moire_model::R_Stack_Moire_Model; valley_index::Int64=1, k_crys_path::Vector{Vector{Float64}}=[[0.0, 0.0], [0.5, 0.0], [1 / 3, 1 / 3], [0.0, 0.0]], nk_per_segment=25, nband=4, plot_range=(-50, 0), align_spec_to_zero::Bool=true, show_spectrum::Bool=false)
+function plot_moire_bands(moire_model::R_Stack_Moire_Model; valley_index::Int64=1, k_crys_path::Vector{Vector{Float64}}=[[0.0, 0.0], [0.5, 0.0], [1 / 3, 1 / 3], [0.0, 0.0]], nk_per_segment=25, nband=5, plot_range=(-50, 0), align_spec_to_zero::Bool=true, show_spectrum::Bool=false)
 
     G1 = [1, 0]
     G2 = [cos(π / 3), sin(π / 3)]
@@ -295,7 +307,7 @@ function plot_moire_bands(moire_model::R_Stack_Moire_Model; valley_index::Int64=
 
     spec_list = Vector{Vector{Float64}}()
     for k_crys in k_crys_list
-        eigvals, eigvecs, info = KrylovKit.eigsolve(moire_model.hk_matrix_for_valley(k_crys, valley_index), nband, :LR)
+        eigvals, eigvecs, info = KrylovKit.eigsolve(moire_model.hk_matrix_for_valley(k_crys, valley_index), nband, :LR, ishermitian=true)
         push!(spec_list, eigvals[1:nband])
     end
     spec_mat = hcat(spec_list...)
