@@ -4,6 +4,8 @@ authors = ["cdqz2014 <xiaodong.hu@bc.edu>"]
 version = "0.1.0"
 
 [deps]
+CMP_Utils = "e2fbd11b-ac1e-4376-ac1b-f197ec013f01"
+HilbertSpace = "e75c84ba-f281-49ed-b77e-8b6c831618f4"
 KrylovKit = "0b1a1467-8014-51b9-945f-bf0ae24f4b77"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MLStyle = "d8e11817-5142-5d16-987a-aa16d5891078"
@@ -13,5 +15,6 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
+HilbertSpace = "0.1.0"
 PhysicalConstants = "0.2.3"
 Unitful = "1.21.0"

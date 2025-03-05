@@ -213,12 +213,14 @@ Constructor of `R_Stack_Moire_Model`
     - `params::Dict{String,<:Number}`: parameters of the model (default to be `params_ChongWang`)
     - `nG_cutoff::Int64=5`: cutoff of `G_int` in either directions
 """
-function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number}=params_ChongWang, nG_cutoff::Int64=5)
+function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number}=params_ChongWang, nG_cutoff::Int64=5, show_params::Bool=false, rotational_symmetric_cutoff::Bool=false)::R_Stack_Moire_Model
     params = merge(params_ChongWang, params)
-    @info let io = IOBuffer()
-        write(io, "Initializing R-Stack Moire Continuum Model with parameters:\n")
-        write(io, "\t$params") # show(io, "text/plain", params)
-        String(take!(io))
+    if show_params
+        @info let io = IOBuffer()
+            write(io, "Initializing R-Stack Moire Continuum Model with parameters:\n")
+            write(io, "\t$params") # show(io, "text/plain", params)
+            String(take!(io))
+        end
     end
 
     aM = params["a"] / (2 * sin(deg2rad(params["θ"] / 2))) # in unit of Å
@@ -229,9 +231,23 @@ function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number
     @assert angle(reciprocal_vec_list[2][1] + im * reciprocal_vec_list[2][2]) ≈ π / 3 # check convention for the moire reciprocal vector: `𝐆2≡e^{i2π/6}𝐆1`
 
 
-    G_int_list = [[iG1, iG2] for iG2 in -nG_cutoff:nG_cutoff for iG1 in -nG_cutoff:nG_cutoff]
+    G_int_list = if rotational_symmetric_cutoff
+        G_int_list_enlarged = [[iG1, iG2] for iG2 in -4*nG_cutoff:4*nG_cutoff for iG1 in -4*nG_cutoff:4*nG_cutoff]
+
+        # filter out those `G_int` such that the `G_crys_list` is rotation symmetric
+        G_crys_list_enlarged = [sum(reciprocal_vec_list .* G_int) for G_int in G_int_list_enlarged]
+        G_crys_threshold = nG_cutoff * norm(reciprocal_vec_list[1]) * (1.0 + 1.0E-10) # the threshold is set to be slightly larger than `nG_cutoff * |𝐆1|`
+        G_crys_list = filter(G_crys -> norm(G_crys) < G_crys_threshold, G_crys_list_enlarged)
+        G_ind_list = [findfirst(x -> x == G_crys, G_crys_list_enlarged) for G_crys in G_crys_list]
+        G_int_list = G_int_list_enlarged[G_ind_list]
+    else
+        [[iG1, iG2] for iG2 in -nG_cutoff:nG_cutoff for iG1 in -nG_cutoff:nG_cutoff]
+    end
     G_int_to_iG_dict = Dict(G_int => iG for (iG, G_int) in enumerate(G_int_list))
     nG = length(G_int_list)
+
+
+
     nl = 2 # number of layers, must be consistent with the size of values of `ΔG_int_to_layer_block_dict`
 
     moire_Hamitonian_basis = HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space(
@@ -256,6 +272,14 @@ function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number
         moire_Hamitonian_basis,
         hk_matrix_for_valley
     )
+end
+
+
+
+function rotation_eigval(n::Int; moire_model::R_Stack_Moire_Model, valley_index::Int=1)
+
+    # for C3-system, we need to investigate three high-symmetry point `γ, k, k′`
+    # [TODO!] first, one needs to derive the rotation transformation for the layer-block moire Hamiltonian to get the representation of the rotation
 end
 
 
