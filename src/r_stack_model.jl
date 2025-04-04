@@ -250,9 +250,11 @@ function initialize_r_stack_moire_continuum_model(; params::Dict{String,<:Number
 
     nl = 2 # number of layers, must be consistent with the size of values of `ΔG_int_to_layer_block_dict`
 
-    moire_Hamitonian_basis = HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space(
-        dof_ndof=(nG, nl),
-        dof_name=("G", "l")
+    moire_Hamitonian_basis = HilbertSpace.Finite_Dimensional_Single_Particle_Hilbert_Space(;
+        dof_range_map=Dict(
+            "G" => 1:nG,
+            "l" => 1:nl
+        )
     )
 
     ΔG_int_to_layer_block_dict = _get_ΔG_int_to_layer_block_dict_within_first_g_shell(; params=params)

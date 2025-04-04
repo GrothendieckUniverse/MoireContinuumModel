@@ -15,6 +15,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
+CMP_Utils = "0.1.0"
 HilbertSpace = "0.1.0"
 PhysicalConstants = "0.2.3"
 Unitful = "1.21.0"
