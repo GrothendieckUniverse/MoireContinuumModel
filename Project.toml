@@ -4,9 +4,10 @@ authors = ["cdqz2014 <xiaodong.hu@bc.edu>"]
 version = "0.1.0"
 
 [deps]
+Arpack = "7d9fca2a-8960-54d3-9f78-7d1dccf2cb97"
 CMP_Utils = "e2fbd11b-ac1e-4376-ac1b-f197ec013f01"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 HilbertSpace = "e75c84ba-f281-49ed-b77e-8b6c831618f4"
-KrylovKit = "0b1a1467-8014-51b9-945f-bf0ae24f4b77"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MLStyle = "d8e11817-5142-5d16-987a-aa16d5891078"
 PhysicalConstants = "5ad8b20f-a522-5ce9-bfc9-ddf1d5bda6ab"
@@ -15,7 +16,8 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 
 [compat]
-CMP_Utils = "0.1.0"
+Arpack = "0.5.4"
+CairoMakie = "0.15.4"
 HilbertSpace = "0.1.0"
 PhysicalConstants = "0.2.3"
 Unitful = "1.21.0"
